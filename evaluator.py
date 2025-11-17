@@ -4,6 +4,7 @@ import os
 from tqdm import tqdm
 import re
 
+
 def load_model_outputs(base_path):
     model_predictions = {}
 
@@ -12,11 +13,17 @@ def load_model_outputs(base_path):
 
         if os.path.isdir(model_folder_path):
             predictions = {}
-            for file_name in ["GraphRAG-Bench_FB", "GraphRAG-Bench_MC", "GraphRAG-Bench_MS", "GraphRAG-Bench_OE", "GraphRAG-Bench_TF"]:
+            for file_name in [
+                "GraphRAG-Bench_FB",
+                "GraphRAG-Bench_MC",
+                "GraphRAG-Bench_MS",
+                "GraphRAG-Bench_OE",
+                "GraphRAG-Bench_TF",
+            ]:
                 file_path = os.path.join(model_folder_path, file_name + ".json")
 
                 if os.path.exists(file_path):
-                    with open(file_path, 'r',encoding="utf-8",errors="ignore") as f:
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                         # data = json.load(f)
                         # 修改了
                         try:
@@ -25,18 +32,20 @@ def load_model_outputs(base_path):
                             print(f"JSON 解析错误: {e}")
                             print(f"错误位置: {e.lineno} 行, {e.colno} 列")
                         prediction_list = []
-                        for key, value in data.items():
+                        for output in data:
                             prediction_dict = {
-                                "prediction": value["prediction"],
-                                "idx": int(key)
+                                "prediction": output["prediction"],
+                                "idx": int(output["id"].split("-")[-1]),
+                                "question": output["question"],
                             }
                             prediction_list.append(prediction_dict)
 
-                        predictions[file_name.split('_')[-1]] = prediction_list
+                        predictions[file_name.split("_")[-1]] = prediction_list
 
             model_predictions[model_folder] = predictions
 
     return model_predictions
+
 
 def load_original_data(original_path):
     original_data = {}
@@ -45,10 +54,11 @@ def load_original_data(original_path):
         file_path = os.path.join(original_path, file_name + ".jsonl")
 
         if os.path.exists(file_path):
-            with open(file_path, 'r') as f:
+            with open(file_path, "r") as f:
                 original_data[file_name] = [json.loads(line.strip()) for line in f]
 
     return original_data
+
 
 def extract_feature(text):
     if "Please answer the following" in text:
@@ -58,33 +68,50 @@ def extract_feature(text):
     if len(parts) < 2:
         return "", ""
 
-    answer = parts[1].strip().split('\n')[0]
+    answer = parts[1].strip().split("\n")[0]
 
     rationale_text = parts[0].strip()
-    if 'RATIONALE:' in rationale_text:
-        rationale = rationale_text.split('RATIONALE:')[1].strip()
+    if "RATIONALE:" in rationale_text:
+        rationale = rationale_text.split("RATIONALE:")[1].strip()
     else:
         rationale = rationale_text.strip()
 
     return [rationale, answer]
 
+
 def post_processor(original_data, prediction, question_type):
     merged_data = {type_: [] for type_ in question_type}
 
     for type_ in question_type:
+        # build dict map for original data
+        quenstion_to_original_data = {
+            orig["Question"]: orig for orig in original_data[type_]
+        }
 
-            merged_data[type_] = [
+        aligned_prediction = []
+
+        for pred in prediction[type_]:
+            pred_q = pred["question"]
+            original_item = quenstion_to_original_data[pred_q]
+
+            pred_text = pred["prediction"]
+            pred_rationable, pred_answer = extract_feature(pred_text)
+
+            # keep same key as original implementation
+            aligned_prediction.append(
                 {
-                    "predict_rationale": extract_feature(pred["prediction"])[0],
-                    "predict_answer": extract_feature(pred["prediction"])[1],
-                    "rationale": orig["Rationale"],
-                    "answer": orig["Answer"],
-                    "topic": orig["Level-1 Topic"]
+                    "predict_rationale": pred_rationable,
+                    "predict_answer": pred_answer,
+                    "rationale": original_item["Rationale"],
+                    "answer": original_item["Answer"],
+                    "topic": original_item["Level-1 Topic"],
                 }
-                for orig, pred in zip(original_data[type_], prediction[type_])
-            ]
+            )
+
+        merged_data[type_] = aligned_prediction
 
     return merged_data
+
 
 def rationale_calculator(pred_rationale, gold_rationale):
     prompt = f"""
@@ -105,10 +132,7 @@ def rationale_calculator(pred_rationale, gold_rationale):
     messages = [{"role": "user", "content": prompt}]
 
     response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages,
-        max_tokens=5,
-        temperature=0
+        model="gpt-4o", messages=messages, max_tokens=5, temperature=0
     )
 
     score_text = response.choices[0].message.content.strip()
@@ -117,6 +141,7 @@ def rationale_calculator(pred_rationale, gold_rationale):
         return float(score_text)
     except ValueError:
         return 0.0
+
 
 def open_ended_calculator(pred_answer, gold_answer):
     prompt = f"""
@@ -137,10 +162,7 @@ def open_ended_calculator(pred_answer, gold_answer):
     messages = [{"role": "user", "content": prompt}]
 
     response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages,
-        max_tokens=5,
-        temperature=0
+        model="gpt-4o", messages=messages, max_tokens=5, temperature=0
     )
 
     score_text = response.choices[0].message.content.strip()
@@ -155,8 +177,9 @@ def em_calculator(data):
     eval_data = []
 
     for item in data:
-        rationale_score = rationale_calculator(pred_rationale=item["predict_rationale"],
-                                               gold_rationale=item["rationale"])
+        rationale_score = rationale_calculator(
+            pred_rationale=item["predict_rationale"], gold_rationale=item["rationale"]
+        )
         if item["predict_answer"] == item["answer"]:
             answer_score = 1.0
         else:
@@ -174,8 +197,9 @@ def ms_calculator(data):
     eval_data = []
 
     for item in data:
-        rationale_score = rationale_calculator(pred_rationale=item["predict_rationale"],
-                                               gold_rationale=item["rationale"])
+        rationale_score = rationale_calculator(
+            pred_rationale=item["predict_rationale"], gold_rationale=item["rationale"]
+        )
 
         correct_answers = set(item["answer"])
         predicted_answers = set(item["predict_answer"])
@@ -194,14 +218,17 @@ def ms_calculator(data):
 
     return eval_data
 
+
 def oe_calculator(data):
     eval_data = []
 
     for item in data:
-        rationale_score = rationale_calculator(pred_rationale=item["predict_rationale"],
-                                               gold_rationale=item["rationale"])
-        answer_score = open_ended_calculator(pred_answer=item["predict_answer"],
-                                             gold_answer=item["answer"])
+        rationale_score = rationale_calculator(
+            pred_rationale=item["predict_rationale"], gold_rationale=item["rationale"]
+        )
+        answer_score = open_ended_calculator(
+            pred_answer=item["predict_answer"], gold_answer=item["answer"]
+        )
 
         item["rationale_score"] = rationale_score
         item["answer_score"] = answer_score
@@ -210,8 +237,8 @@ def oe_calculator(data):
 
     return eval_data
 
-def evaluator(type_, data):
 
+def evaluator(type_, data):
     if type_ == "MC" or type_ == "TF":
         eval_data = em_calculator(data)
     elif type_ == "MS":
@@ -223,6 +250,7 @@ def evaluator(type_, data):
         eval_data = []
 
     return eval_data
+
 
 def calculate_ar_score(answer_score, rationale_score):
     if answer_score == 1 and rationale_score == 1:
@@ -238,13 +266,27 @@ def calculate_ar_score(answer_score, rationale_score):
     else:
         return 0.0
 
+
 def run_eval(origin_data, prediction, question_type):
     merged_data = post_processor(origin_data, prediction, question_type)
 
     results = {
-        "total": {"rationale_score": 0.0, "answer_score": 0.0, "ar_score": 0.0, "count": 0},
-        "by_type": {type_: {"rationale_score": 0.0, "answer_score": 0.0, "ar_score": 0.0, "count": 0} for type_ in question_type},
-        "by_topic": {}
+        "total": {
+            "rationale_score": 0.0,
+            "answer_score": 0.0,
+            "ar_score": 0.0,
+            "count": 0,
+        },
+        "by_type": {
+            type_: {
+                "rationale_score": 0.0,
+                "answer_score": 0.0,
+                "ar_score": 0.0,
+                "count": 0,
+            }
+            for type_ in question_type
+        },
+        "by_topic": {},
     }
 
     for type_ in tqdm(question_type, desc="Evaluating different question types"):
@@ -267,7 +309,12 @@ def run_eval(origin_data, prediction, question_type):
 
             topic = item["topic"]
             if topic not in results["by_topic"]:
-                results["by_topic"][topic] = {"rationale_score": 0.0, "answer_score": 0.0, "ar_score": 0.0, "count": 0}
+                results["by_topic"][topic] = {
+                    "rationale_score": 0.0,
+                    "answer_score": 0.0,
+                    "ar_score": 0.0,
+                    "count": 0,
+                }
             results["by_topic"][topic]["rationale_score"] += rationale_score
             results["by_topic"][topic]["answer_score"] += answer_score
             results["by_topic"][topic]["ar_score"] += ar_score
@@ -280,37 +327,48 @@ def run_eval(origin_data, prediction, question_type):
 
     for type_ in results["by_type"]:
         if results["by_type"][type_]["count"] > 0:
-            results["by_type"][type_]["rationale_score"] /= results["by_type"][type_]["count"]
-            results["by_type"][type_]["answer_score"] /= results["by_type"][type_]["count"]
+            results["by_type"][type_]["rationale_score"] /= results["by_type"][type_][
+                "count"
+            ]
+            results["by_type"][type_]["answer_score"] /= results["by_type"][type_][
+                "count"
+            ]
             results["by_type"][type_]["ar_score"] /= results["by_type"][type_]["count"]
 
     for topic in results["by_topic"]:
         if results["by_topic"][topic]["count"] > 0:
-            results["by_topic"][topic]["rationale_score"] /= results["by_topic"][topic]["count"]
-            results["by_topic"][topic]["answer_score"] /= results["by_topic"][topic]["count"]
-            results["by_topic"][topic]["ar_score"] /= results["by_topic"][topic]["count"]
+            results["by_topic"][topic]["rationale_score"] /= results["by_topic"][topic][
+                "count"
+            ]
+            results["by_topic"][topic]["answer_score"] /= results["by_topic"][topic][
+                "count"
+            ]
+            results["by_topic"][topic]["ar_score"] /= results["by_topic"][topic][
+                "count"
+            ]
 
     return results
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
     client = OpenAI(api_key="")
 
     question_type = ["FB", "MC", "MS", "OE", "TF"]
 
-    original_path = "/"
+    original_path = "Datasets/questions"
     original_data = load_original_data(original_path)
 
-    base_path = "/"
+    base_path = "Datasets/output"
     predictions = load_model_outputs(base_path)
 
-    output_file_path = "/"
+    output_file_path = "Datasets/evaluation_results.json"
 
-    with open(output_file_path, 'r', encoding='utf-8',errors="ignore") as outfile:
+    with open(output_file_path, "r", encoding="utf-8", errors="ignore") as outfile:
         data = json.load(outfile)
 
-    for model_name, prediction in tqdm(predictions.items(), desc="Evaluating Models", unit="model"):
-
+    for model_name, prediction in tqdm(
+        predictions.items(), desc="Evaluating Models", unit="model"
+    ):
         if model_name in data:
             print(f"Skipping {model_name}, already evaluated.")
             continue
@@ -319,5 +377,5 @@ if __name__ == "__main__":
 
         data[model_name] = results
 
-        with open(output_file_path, 'w') as outfile:
+        with open(output_file_path, "w") as outfile:
             json.dump(data, outfile)
